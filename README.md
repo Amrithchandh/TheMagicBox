@@ -1,6 +1,9 @@
 ---------------------Magic Box---------------------------------
 Project Structure
 
+
+
+
 magic-box/
 ├── client/          # React + Vite frontend (Google Meet UI + Three.js 3D space)
 │   ├── src/
