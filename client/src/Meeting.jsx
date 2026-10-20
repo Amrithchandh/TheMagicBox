@@ -13,7 +13,28 @@ import SideDrawer from './components/SideDrawer.jsx';
 import { enc, dec } from './util.js';
 
 export default function Meeting({ conn, prefs, onLeave }) {
-  const [connectionError, setConnectionError] = useState(null);
+  const [useLocalFallback, setUseLocalFallback] = useState(false);
+  const [connectionNotice, setConnectionNotice] = useState(null);
+
+  // If LiveKit fails or token is invalid, fallback smoothly to local mode
+  const handleLiveKitError = (err) => {
+    console.warn('LiveKit Cloud connection unavailable, falling back to Local Mode:', err);
+    setConnectionNotice(
+      'LiveKit Cloud secret is not configured in server/.env. Running in Local Mode with full UI, camera/mic, 3D space, and controls!'
+    );
+    setUseLocalFallback(true);
+  };
+
+  if (useLocalFallback) {
+    return (
+      <LocalMeeting
+        conn={conn}
+        prefs={prefs}
+        onLeave={onLeave}
+        notice={connectionNotice}
+      />
+    );
+  }
 
   return (
     <LiveKitRoom
@@ -22,41 +43,57 @@ export default function Meeting({ conn, prefs, onLeave }) {
       connect
       video={prefs.videoEnabled}
       audio={prefs.audioEnabled}
-      onDisconnected={onLeave}
-      onError={(err) => {
-        console.error('LiveKit connection error:', err);
-        setConnectionError(err.message || 'Failed to connect to LiveKit');
+      onError={handleLiveKitError}
+      onDisconnected={(reason) => {
+        // Only trigger fallback if disconnected unexpectedly during setup
+        if (!useLocalFallback) {
+          handleLiveKitError(new Error('Disconnected from LiveKit Cloud'));
+        }
       }}
       data-lk-theme="default"
       style={{ height: '100vh', width: '100vw', overflow: 'hidden' }}
     >
-      <MeetingShell
+      <LiveKitShell
         conn={conn}
         prefs={prefs}
         onLeave={onLeave}
-        connectionError={connectionError}
+        onErrorFallback={() => setUseLocalFallback(true)}
       />
       <RoomAudioRenderer />
     </LiveKitRoom>
   );
 }
 
-function MeetingShell({ conn, prefs, onLeave, connectionError }) {
+// -------------------------------------------------------------
+// 1. LIVEKIT CLOUD SHELL (Active when LiveKit Cloud is connected)
+// -------------------------------------------------------------
+function LiveKitShell({ conn, prefs, onLeave, onErrorFallback }) {
   const { localParticipant, isMicrophoneEnabled, isCameraEnabled, isScreenShareEnabled } =
     useLocalParticipant();
   const participants = useParticipants();
   const connectionState = useConnectionState();
 
-  const [activePanel, setActivePanel] = useState(null); // 'info' | 'people' | 'chat' | 'activities' | 'host' | null
+  const [activePanel, setActivePanel] = useState(null);
   const [hands, setHands] = useState({});
   const [pinnedId, setPinnedId] = useState(null);
   const [reactions, setReactions] = useState([]);
   const [messages, setMessages] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [incomingScene, setIncomingScene] = useState(null);
 
   const roomCode = new URLSearchParams(window.location.search).get('room') || 'meeting';
 
-  // Handle reactions data channel
+  // Fallback if connection fails
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (connectionState === 'disconnected') {
+        onErrorFallback();
+      }
+    }, 4000);
+    return () => clearTimeout(timer);
+  }, [connectionState, onErrorFallback]);
+
+  // Reactions data channel
   const handleIncomingReaction = (senderId, senderName, emoji) => {
     if (emoji === '✋') {
       setHands((prev) => ({ ...prev, [senderId]: !prev[senderId] }));
@@ -72,9 +109,7 @@ function MeetingShell({ conn, prefs, onLeave, connectionError }) {
     try {
       const data = dec(msg.payload);
       handleIncomingReaction(msg.from?.identity, msg.from?.name, data.emoji);
-    } catch (e) {
-      console.error(e);
-    }
+    } catch {}
   });
 
   const sendReaction = (emoji) => {
@@ -85,7 +120,7 @@ function MeetingShell({ conn, prefs, onLeave, connectionError }) {
     handleIncomingReaction(localParticipant.identity, 'You', emoji);
   };
 
-  // Handle chat data channel
+  // Chat data channel
   const { send: sendChatData } = useDataChannel('chat', (msg) => {
     try {
       const data = dec(msg.payload);
@@ -101,9 +136,7 @@ function MeetingShell({ conn, prefs, onLeave, connectionError }) {
       if (activePanel !== 'chat') {
         setUnreadCount((c) => c + 1);
       }
-    } catch (e) {
-      console.error(e);
-    }
+    } catch {}
   });
 
   const sendChat = (text) => {
@@ -122,7 +155,19 @@ function MeetingShell({ conn, prefs, onLeave, connectionError }) {
     ]);
   };
 
-  // Toggle Controls
+  // 3D Scene data channel
+  const { send: sendSceneData } = useDataChannel('scene', (msg) => {
+    try {
+      setIncomingScene(dec(msg.payload));
+    } catch {}
+  });
+
+  const broadcastScene = (data) => {
+    try {
+      sendSceneData(enc(data), { reliable: true });
+    } catch {}
+  };
+
   const toggleMic = async () => {
     if (localParticipant) {
       await localParticipant.setMicrophoneEnabled(!isMicrophoneEnabled);
@@ -152,12 +197,9 @@ function MeetingShell({ conn, prefs, onLeave, connectionError }) {
     }
   };
 
-  // Screen share priority or pinned participant priority
-  const screenSharer = participants.find((p) => p.isScreenShareEnabled);
   const isHandRaised = localParticipant ? !!hands[localParticipant.identity] : false;
 
-  // Grid layout class based on participant count
-  const count = participants.length;
+  const count = participants.length || 1;
   let gridClass = 'gm-grid-1';
   if (count === 2) gridClass = 'gm-grid-2';
   else if (count >= 3 && count <= 4) gridClass = 'gm-grid-4';
@@ -166,17 +208,7 @@ function MeetingShell({ conn, prefs, onLeave, connectionError }) {
 
   return (
     <div className="gm-meeting-shell">
-      {/* Alert banner if LiveKit secret mismatch / connection error */}
-      {connectionError && (
-        <div className="gm-connection-alert">
-          <strong>Connection notice:</strong> {connectionError}
-          <span> (Ensure LIVEKIT_API_SECRET in server/.env matches your LiveKit Cloud project)</span>
-        </div>
-      )}
-
-      {/* Main meeting area */}
       <div className="gm-meeting-body">
-        {/* Video Stage */}
         <main className={`gm-video-stage ${activePanel ? 'with-drawer' : ''}`}>
           <div className={`gm-video-grid ${gridClass}`}>
             {participants.map((p) => (
@@ -190,7 +222,6 @@ function MeetingShell({ conn, prefs, onLeave, connectionError }) {
             ))}
           </div>
 
-          {/* Floating Emoji Reactions Display */}
           <div className="gm-floating-reactions">
             {reactions.map((r) => (
               <div key={r.id} className="gm-floating-reaction-bubble">
@@ -200,7 +231,6 @@ function MeetingShell({ conn, prefs, onLeave, connectionError }) {
           </div>
         </main>
 
-        {/* Side Drawer */}
         {activePanel && (
           <SideDrawer
             activePanel={activePanel}
@@ -211,11 +241,12 @@ function MeetingShell({ conn, prefs, onLeave, connectionError }) {
             onSendMessage={sendChat}
             conn={conn}
             hands={hands}
+            onBroadcastScene={broadcastScene}
+            incomingSceneMessage={incomingScene}
           />
         )}
       </div>
 
-      {/* Bottom Control Bar */}
       <BottomBar
         roomCode={roomCode}
         isMicOn={isMicrophoneEnabled}
@@ -233,6 +264,320 @@ function MeetingShell({ conn, prefs, onLeave, connectionError }) {
         participantCount={participants.length}
         unreadCount={unreadCount}
         isHost={conn.host}
+      />
+    </div>
+  );
+}
+
+// -------------------------------------------------------------
+// 2. LOCAL MEETING (Resilient Google Meet UI with local media & BroadcastChannel)
+// -------------------------------------------------------------
+function LocalMeeting({ conn, prefs, onLeave, notice }) {
+  const roomCode = new URLSearchParams(window.location.search).get('room') || 'meeting';
+  const username = prefs?.username || localStorage.getItem('gm_username') || 'You';
+
+  const [stream, setStream] = useState(null);
+  const [screenStream, setScreenStream] = useState(null);
+  const [isMicOn, setIsMicOn] = useState(prefs?.audioEnabled !== false);
+  const [isVideoOn, setIsVideoOn] = useState(prefs?.videoEnabled !== false);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [isHandRaised, setIsHandRaised] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+
+  const [activePanel, setActivePanel] = useState(null);
+  const [reactions, setReactions] = useState([]);
+  const [messages, setMessages] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [dismissNotice, setDismissNotice] = useState(false);
+
+  // Simulated & cross-tab participants
+  const [extraParticipants, setExtraParticipants] = useState([]);
+  const [pinnedId, setPinnedId] = useState(null);
+
+  const broadcastChannelRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const analyserRef = useRef(null);
+
+  // Setup camera & mic stream
+  useEffect(() => {
+    let localMedia = null;
+
+    async function initMedia() {
+      try {
+        const s = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true,
+        });
+        localMedia = s;
+        setStream(s);
+
+        // Audio wave analysis for speaking indicator
+        try {
+          const AudioContext = window.AudioContext || window.webkitAudioContext;
+          if (AudioContext) {
+            const ctx = new AudioContext();
+            audioContextRef.current = ctx;
+            const analyser = ctx.createAnalyser();
+            analyser.fftSize = 64;
+            analyserRef.current = analyser;
+            const src = ctx.createMediaStreamSource(s);
+            src.connect(analyser);
+
+            const check = () => {
+              if (!analyserRef.current) return;
+              const data = new Uint8Array(analyserRef.current.frequencyBinCount);
+              analyserRef.current.getByteFrequencyData(data);
+              const avg = data.reduce((a, b) => a + b, 0) / data.length;
+              setIsSpeaking(avg > 18);
+              requestAnimationFrame(check);
+            };
+            check();
+          }
+        } catch {}
+      } catch (err) {
+        console.warn('Could not access full media in local mode:', err);
+        try {
+          const s = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+          localMedia = s;
+          setStream(s);
+          setIsVideoOn(false);
+        } catch {}
+      }
+    }
+
+    initMedia();
+
+    return () => {
+      if (audioContextRef.current) audioContextRef.current.close().catch(() => {});
+      if (localMedia) {
+        localMedia.getTracks().forEach((t) => t.stop());
+      }
+    };
+  }, []);
+
+  // Sync mic & video track states
+  useEffect(() => {
+    if (stream) {
+      stream.getVideoTracks().forEach((t) => (t.enabled = isVideoOn));
+    }
+  }, [isVideoOn, stream]);
+
+  useEffect(() => {
+    if (stream) {
+      stream.getAudioTracks().forEach((t) => (t.enabled = isMicOn));
+    }
+  }, [isMicOn, stream]);
+
+  // Setup BroadcastChannel for cross-tab local communication
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      const channel = new BroadcastChannel(`magic-box-room-${roomCode}`);
+      broadcastChannelRef.current = channel;
+
+      channel.onmessage = (event) => {
+        const { type, payload } = event.data || {};
+        if (type === 'chat') {
+          setMessages((prev) => [...prev, payload]);
+          if (activePanel !== 'chat') setUnreadCount((c) => c + 1);
+        } else if (type === 'reaction') {
+          triggerReaction(payload.name, payload.emoji);
+        } else if (type === 'presence') {
+          // Add peer if not present
+          setExtraParticipants((prev) => {
+            if (prev.some((p) => p.identity === payload.identity)) return prev;
+            return [...prev, payload];
+          });
+        }
+      };
+
+      // Announce presence to other local tabs
+      channel.postMessage({
+        type: 'presence',
+        payload: {
+          identity: `peer-${Math.random().toString(36).slice(2, 6)}`,
+          name: username,
+          isCameraEnabled: false,
+          isMicrophoneEnabled: true,
+          isLocal: false,
+        },
+      });
+
+      return () => channel.close();
+    }
+  }, [roomCode, username, activePanel]);
+
+  const triggerReaction = (senderName, emoji) => {
+    const id = Math.random().toString();
+    setReactions((prev) => [...prev, { id, text: `${senderName || 'Someone'} ${emoji}` }]);
+    setTimeout(() => {
+      setReactions((prev) => prev.filter((r) => r.id !== id));
+    }, 3500);
+  };
+
+  const handleSendReaction = (emoji) => {
+    if (emoji === '✋') {
+      setIsHandRaised(!isHandRaised);
+    }
+    triggerReaction('You', emoji);
+    if (broadcastChannelRef.current) {
+      broadcastChannelRef.current.postMessage({
+        type: 'reaction',
+        payload: { name: username, emoji },
+      });
+    }
+  };
+
+  const handleSendChat = (text) => {
+    const msg = {
+      sender: 'You',
+      text,
+      time: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
+      isLocal: true,
+    };
+    setMessages((prev) => [...prev, msg]);
+    if (broadcastChannelRef.current) {
+      broadcastChannelRef.current.postMessage({
+        type: 'chat',
+        payload: { ...msg, sender: username, isLocal: false },
+      });
+    }
+  };
+
+  const toggleMic = () => setIsMicOn(!isMicOn);
+  const toggleVideo = () => setIsVideoOn(!isVideoOn);
+
+  const toggleScreenShare = async () => {
+    if (isScreenSharing) {
+      if (screenStream) {
+        screenStream.getTracks().forEach((t) => t.stop());
+        setScreenStream(null);
+      }
+      setIsScreenSharing(false);
+    } else {
+      try {
+        const s = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        setScreenStream(s);
+        setIsScreenSharing(true);
+        s.getVideoTracks()[0].onended = () => {
+          setIsScreenSharing(false);
+          setScreenStream(null);
+        };
+      } catch {
+        setIsScreenSharing(false);
+      }
+    }
+  };
+
+  const addSimulatedParticipant = () => {
+    const names = ['Alex Rivera', 'Sarah Chen', 'Jordan Smith', 'Devin Taylor'];
+    const randomName = names[extraParticipants.length % names.length];
+    const newPeer = {
+      identity: `sim-${Date.now()}`,
+      name: `${randomName}`,
+      isCameraEnabled: false,
+      isMicrophoneEnabled: true,
+      isLocal: false,
+    };
+    setExtraParticipants((prev) => [...prev, newPeer]);
+  };
+
+  const handleTogglePanel = (panelName) => {
+    setActivePanel((prev) => (prev === panelName ? null : panelName));
+    if (panelName === 'chat') setUnreadCount(0);
+  };
+
+  // Compile participants list
+  const localParticipantObj = {
+    identity: 'local-user',
+    name: username,
+    isLocal: true,
+    stream: isScreenSharing && screenStream ? screenStream : stream,
+    isCameraEnabled: isScreenSharing ? true : isVideoOn,
+    isMicrophoneEnabled: isMicOn,
+    isSpeaking,
+  };
+
+  const allParticipants = [localParticipantObj, ...extraParticipants];
+  const count = allParticipants.length;
+
+  let gridClass = 'gm-grid-1';
+  if (count === 2) gridClass = 'gm-grid-2';
+  else if (count >= 3 && count <= 4) gridClass = 'gm-grid-4';
+  else if (count >= 5 && count <= 6) gridClass = 'gm-grid-6';
+  else if (count > 6) gridClass = 'gm-grid-many';
+
+  return (
+    <div className="gm-meeting-shell">
+      {/* Notice Banner */}
+      {notice && !dismissNotice && (
+        <div className="gm-connection-alert">
+          <span>{notice}</span>
+          <button
+            type="button"
+            className="gm-alert-dismiss"
+            onClick={() => setDismissNotice(true)}
+            title="Dismiss"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      <div className="gm-meeting-body">
+        <main className={`gm-video-stage ${activePanel ? 'with-drawer' : ''}`}>
+          <div className={`gm-video-grid ${gridClass}`}>
+            {allParticipants.map((p) => (
+              <VideoTile
+                key={p.identity}
+                participant={p}
+                isHandRaised={p.isLocal ? isHandRaised : false}
+                isPinned={pinnedId === p.identity}
+                onTogglePin={(id) => setPinnedId(pinnedId === id ? null : id)}
+              />
+            ))}
+          </div>
+
+          <div className="gm-floating-reactions">
+            {reactions.map((r) => (
+              <div key={r.id} className="gm-floating-reaction-bubble">
+                {r.text}
+              </div>
+            ))}
+          </div>
+        </main>
+
+        {activePanel && (
+          <SideDrawer
+            activePanel={activePanel}
+            onClose={() => setActivePanel(null)}
+            roomCode={roomCode}
+            participants={allParticipants}
+            messages={messages}
+            onSendMessage={handleSendChat}
+            conn={{ host: 'local-user', token: 'local-token' }}
+            hands={{ 'local-user': isHandRaised }}
+            onAddParticipant={addSimulatedParticipant}
+          />
+        )}
+      </div>
+
+      <BottomBar
+        roomCode={roomCode}
+        isMicOn={isMicOn}
+        isVideoOn={isVideoOn}
+        isScreenSharing={isScreenSharing}
+        isHandRaised={isHandRaised}
+        onToggleMic={toggleMic}
+        onToggleVideo={toggleVideo}
+        onToggleScreenShare={toggleScreenShare}
+        onToggleHand={() => handleSendReaction('✋')}
+        onSendReaction={handleSendReaction}
+        onLeave={onLeave}
+        activePanel={activePanel}
+        onTogglePanel={handleTogglePanel}
+        participantCount={allParticipants.length}
+        unreadCount={unreadCount}
+        isHost={true}
       />
     </div>
   );

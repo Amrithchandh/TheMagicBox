@@ -651,16 +651,30 @@ input {
 }
 
 .gm-connection-alert {
-  background: #501d1b;
+  background: #391e1d;
   color: #f28b82;
   font-size: 13px;
   padding: 8px 24px;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 12px;
   border-bottom: 1px solid var(--gm-red);
   z-index: 100;
+}
+
+.gm-alert-dismiss {
+  background: none;
+  border: none;
+  color: #f28b82;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.gm-alert-dismiss:hover {
+  background: rgba(255, 255, 255, 0.1);
 }
 
 .gm-meeting-body {

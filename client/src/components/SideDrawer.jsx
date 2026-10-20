@@ -14,6 +14,7 @@ import {
   BarChart2,
   FileText,
   Lock,
+  UserPlus,
 } from 'lucide-react';
 import Space3D from '../Space3D.jsx';
 
@@ -24,13 +25,16 @@ export default function SideDrawer({
   participants = [],
   messages = [],
   onSendMessage,
-  conn,
+  conn = {},
   hands = {},
+  onBroadcastScene,
+  incomingSceneMessage,
+  onAddParticipant,
 }) {
   const [copied, setCopied] = useState(false);
   const [search, setSearch] = useState('');
   const [chatInput, setChatInput] = useState('');
-  const [activeActivity, setActiveActivity] = useState('magic-box'); // default to magic-box for immediate access
+  const [activeActivity, setActiveActivity] = useState('magic-box');
 
   if (!activePanel) return null;
 
@@ -48,6 +52,7 @@ export default function SideDrawer({
   };
 
   const callHostApi = (path, identity) => {
+    if (!conn?.token) return;
     fetch(`/api/${path}`, {
       method: 'POST',
       headers: {
@@ -55,7 +60,7 @@ export default function SideDrawer({
         Authorization: `Bearer ${conn.token}`,
       },
       body: JSON.stringify({ identity }),
-    });
+    }).catch(() => {});
   };
 
   const filteredPeople = participants.filter((p) =>
@@ -123,6 +128,20 @@ export default function SideDrawer({
                 className="gm-search-input"
               />
             </div>
+
+            {onAddParticipant && (
+              <div style={{ padding: '0 20px 12px 20px' }}>
+                <button
+                  type="button"
+                  className="gm-btn-secondary"
+                  style={{ width: '100%', justifyContent: 'center', height: '38px', fontSize: '13px' }}
+                  onClick={onAddParticipant}
+                >
+                  <UserPlus size={16} />
+                  <span>Add simulated participant</span>
+                </button>
+              </div>
+            )}
 
             <div className="gm-people-count">IN CALL ({filteredPeople.length})</div>
 
@@ -267,7 +286,10 @@ export default function SideDrawer({
               </div>
             ) : (
               <div className="gm-activity-embed">
-                <Space3D />
+                <Space3D
+                  onBroadcastScene={onBroadcastScene}
+                  incomingSceneMessage={incomingSceneMessage}
+                />
               </div>
             )}
           </div>

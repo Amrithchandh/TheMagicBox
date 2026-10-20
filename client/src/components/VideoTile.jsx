@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Mic, MicOff, Pin, PinOff, Hand } from 'lucide-react';
 import { useIsSpeaking } from '@livekit/components-react';
 
@@ -25,25 +25,52 @@ export default function VideoTile({
   isPinned = false,
   onTogglePin,
 }) {
-  const isSpeaking = useIsSpeaking(participant);
   const videoRef = useRef(null);
 
-  const cameraPub = participant.getTrackPublication('camera');
-  const cameraTrack = cameraPub?.track;
-  const isCameraEnabled = participant.isCameraEnabled && cameraTrack && !cameraPub?.isMuted;
-  const isMicEnabled = participant.isMicrophoneEnabled && !participant.getTrackPublication('microphone')?.isMuted;
+  // Safely check if participant is a LiveKit Participant instance
+  const isLiveKitParticipant = typeof participant?.on === 'function' && typeof participant?.getTrackPublication === 'function';
+
+  let isSpeaking = !!participant?.isSpeaking;
+  if (isLiveKitParticipant) {
+    try {
+      // eslint-disable-next-line react-hooks/rules-of-hooks
+      isSpeaking = useIsSpeaking(participant);
+    } catch {
+      isSpeaking = !!participant?.isSpeaking;
+    }
+  }
+
+  let cameraTrack = null;
+  let isCameraEnabled = false;
+  let isMicEnabled = true;
+
+  if (isLiveKitParticipant) {
+    const cameraPub = participant.getTrackPublication('camera');
+    cameraTrack = cameraPub?.track;
+    isCameraEnabled = !!(participant.isCameraEnabled && cameraTrack && !cameraPub?.isMuted);
+    isMicEnabled = !!(participant.isMicrophoneEnabled && !participant.getTrackPublication('microphone')?.isMuted);
+  } else {
+    isCameraEnabled = participant?.isCameraEnabled !== false;
+    isMicEnabled = participant?.isMicrophoneEnabled !== false;
+  }
 
   useEffect(() => {
     const el = videoRef.current;
-    if (el && cameraTrack) {
+    if (!el) return;
+
+    if (cameraTrack && typeof cameraTrack.attach === 'function') {
       cameraTrack.attach(el);
       return () => {
-        cameraTrack.detach(el);
+        try {
+          cameraTrack.detach(el);
+        } catch {}
       };
+    } else if (participant?.stream) {
+      el.srcObject = isCameraEnabled ? participant.stream : null;
     }
-  }, [cameraTrack, isCameraEnabled]);
+  }, [cameraTrack, isCameraEnabled, participant?.stream]);
 
-  const displayName = participant.name || participant.identity || 'Participant';
+  const displayName = participant?.name || participant?.identity || 'Participant';
   const initial = (displayName[0] || 'U').toUpperCase();
   const avatarBg = getAvatarColor(displayName);
 
@@ -59,7 +86,7 @@ export default function VideoTile({
           ref={videoRef}
           autoPlay
           playsInline
-          muted={participant.isLocal}
+          muted={participant?.isLocal}
           className="gm-tile-video"
         />
       ) : (
@@ -87,13 +114,13 @@ export default function VideoTile({
       {/* Bottom left label: Name + pin button */}
       <div className="gm-tile-bottom-bar">
         <span className="gm-tile-name">
-          {displayName} {participant.isLocal ? '(You)' : ''}
+          {displayName} {participant?.isLocal ? '(You)' : ''}
         </span>
         {onTogglePin && (
           <button
             type="button"
             className={`gm-tile-pin-btn ${isPinned ? 'active' : ''}`}
-            onClick={() => onTogglePin(participant.identity)}
+            onClick={() => onTogglePin(participant?.identity)}
             title={isPinned ? 'Unpin' : 'Pin to screen'}
           >
             {isPinned ? <PinOff size={14} /> : <Pin size={14} />}
